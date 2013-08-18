@@ -37,6 +37,8 @@ class HarvesterBase(SingletonPlugin):
 
     config = None
 
+    _user_name = None
+
     def _gen_new_name(self, title):
         '''
         Creates a URL friendly name from a title
@@ -48,7 +50,7 @@ class HarvesterBase(SingletonPlugin):
         while '--' in name:
             name = name.replace('--', '-')
         pkg_obj = Session.query(Package).filter(Package.name == name).first()
-        if pkg_obj:
+        if pkg_obj or name == '-':
             return name + str(uuid.uuid4())[:5]
         else:
             return name
@@ -79,6 +81,16 @@ class HarvesterBase(SingletonPlugin):
             log_message = '{0}, line {1}'.format(message,line) if line else message
             log.debug(log_message)
 
+    def _get_user_name(self):
+	'''                                              
+        Returns the name of the user that will perform the harvesting actions                                                                     
+        (deleting, updating and creating datasets)
+	'''                                                                                                                                     
+        if self._user_name:                                        
+            return self._user_name
+        self._site_user = p.toolkit.get_action('get_site_user')({'model': model, 'ignore_auth': True}, {})
+        self._user_name = self._site_user['name']
+	return self._user_name                                                                                                                    
 
     def _create_harvest_objects(self, remote_ids, harvest_job):
         '''
@@ -136,10 +148,10 @@ class HarvesterBase(SingletonPlugin):
                     raise ValueError('api_version must be an integer')
 
                 #TODO: use site user when available
-                user_name = self.config.get('user', u'harvest')
+                user_name = self.config.get('user', self._get_user_name())
             else:
                 api_version = 2
-                user_name = u'harvest'
+                user_name = self._get_user_name()
 
             context = {
                 'model': model,
@@ -151,8 +163,6 @@ class HarvesterBase(SingletonPlugin):
             }
 
             tags = package_dict.get('tags', [])
-            tags = [munge_tag(t) for t in tags]
-            tags = list(set(tags))
             package_dict['tags'] = tags
 
             # Check if package exists
@@ -160,31 +170,7 @@ class HarvesterBase(SingletonPlugin):
             data_dict['id'] = package_dict['id']
             try:
                 existing_package_dict = get_action('package_show')(context, data_dict)
-                # Check modified date
-                if not 'metadata_modified' in package_dict or \
-                   package_dict['metadata_modified'] > existing_package_dict.get('metadata_modified'):
-                    log.info('Package with GUID %s exists and needs to be updated' % harvest_object.guid)
-                    # Update package
-                    context.update({'id':package_dict['id']})
-                    new_package = get_action('package_update_rest')(context, package_dict)
-
-                else:
-                    log.info('Package with GUID %s not updated, skipping...' % harvest_object.guid)
-                    return
-
-                # Flag the other objects linking to this package as not current anymore
-                from ckanext.harvest.model import harvest_object_table
-                conn = Session.connection()
-                u = update(harvest_object_table) \
-                        .where(harvest_object_table.c.package_id==bindparam('b_package_id')) \
-                        .values(current=False)
-                conn.execute(u, b_package_id=new_package['id'])
-
-                # Flag this as the current harvest object
-
-                harvest_object.package_id = new_package['id']
-                harvest_object.current = True
-                harvest_object.save()
+		log.info('Package with GUID %s not updated, skipping...' % harvest_object.guid)
 
             except NotFound:
                 # Package needs to be created
